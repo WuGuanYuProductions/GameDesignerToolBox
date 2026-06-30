@@ -542,7 +542,7 @@ def show_save_dialog():
         selected_tags.append("⏱️ 功能时序流向拆解")
         export_payload["seq_df"] = st.session_state.seq_df.to_dict(orient="records")
     if save_fsm:
-        selected_tags.append("📋 有限状态机拆解")
+        selected_tags.append("📋 有限状态机拆解", value=False)
         export_payload["fsm_df"] = st.session_state.fsm_df.to_dict(orient="records")
     if save_ui:
         selected_tags.append("🎨 界面层级拆解")
@@ -557,18 +557,13 @@ def show_save_dialog():
     for _tid in tool_ids:
         export_payload[f"owner_{_tid}"] = st.session_state.get(f"owner_{_tid}", "").strip()
         export_payload[f"scheme_title_{_tid}"] = st.session_state.get(f"scheme_title_{_tid}", "").strip()
-        
-        # 修复同步 bug：Quill 实际存储在带有版本后缀_{ver}的 key 里
-        ver = st.session_state.get(f"{_tid}_ver", 0)
-        
         summary_val = st.session_state.get(f"rte_{_tid}_summary_text", "")
         if not summary_val or str(summary_val).strip() == "":
-            summary_val = st.session_state.get(f"quill_{_tid}_summary_{ver}", "")
+            summary_val = st.session_state.get(f"quill_{_tid}_summary", "")
         export_payload[f"summary_{_tid}"] = summary_val
-        
         scheme_val = st.session_state.get(f"rte_{_tid}_scheme_text", "")
         if not scheme_val or str(scheme_val).strip() == "":
-            scheme_val = st.session_state.get(f"quill_{_tid}_scheme_{ver}", "")
+            scheme_val = st.session_state.get(f"quill_{_tid}_scheme", "")
         export_payload[f"scheme_{_tid}"] = scheme_val
 
     if not selected_tags:
@@ -583,7 +578,7 @@ def show_save_dialog():
         abbr_tags = [t[:2].strip(" 🎮⏱️📋🎨⚔️🐟") for t in selected_tags]
         filename = f"GameDesignDocumentsSave_{'_'.join(abbr_tags)}.json"
         st.download_button(
-            label="💾 确认并下载备份 file",
+            label="💾 确认并下载备份文件",
             data=json_bytes,
             file_name=filename,
             mime="application/json",
@@ -671,13 +666,11 @@ def show_load_dialog():
                             st.session_state[f"rte_{_tid}_summary_text"] = summary_val
                             st.session_state[f"quill_{_tid}_summary"] = summary_val
                             st.session_state[f"quill_{_tid}_summary_{next_ver}"] = summary_val
-                            st.session_state[f"quill_just_imported_{_tid}_summary"] = True
                         if f"scheme_{_tid}" in data_block:
                             scheme_val = data_block[f"scheme_{_tid}"]
                             st.session_state[f"rte_{_tid}_scheme_text"] = scheme_val
                             st.session_state[f"quill_{_tid}_scheme"] = scheme_val
                             st.session_state[f"quill_{_tid}_scheme_{next_ver}"] = scheme_val
-                            st.session_state[f"quill_just_imported_{_tid}_scheme"] = True
                 
                 st.rerun()
         except Exception as e:
@@ -750,100 +743,60 @@ def generate_title_banner_bytes(text, level="H1"):
 def normalize_html_styles(text):
     """
     清洗并规范化输入中的所有富文本HTML样式、Quill 行内样式和文本换行。
-    完美规整为 100% 对应且对称闭合的 <font color="..." size="..."> 样式标签，
-    以便 Word 与 PDF 生成时高保真提取样式，彻底规避因标签失衡导致 ReportLab 等解析崩溃的问题。
+    转换各种标签样式，统一输出为带属性的特定自定义伪标签，供后续解析器生成 Word 和 PDF 时提取样式。
     """
     if not text:
         return ""
     
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    
     text = text.replace("<strong>", "<b>").replace("</strong>", "</b>")
     text = text.replace("<em>", "<i>").replace("</em>", "</i>")
     text = text.replace("<s>", "<strike>").replace("</s>", "</strike>")
     
-    parts = re.split(r'(<[^>]+>)', text)
-    converted_tags_stack = []
-    new_parts = []
-    
-    for part in parts:
-        if not part:
-            continue
-        if part.startswith('<') and part.endswith('>'):
-            tag_lower = part.lower()
-            if (tag_lower.startswith('<span') or tag_lower.startswith('<font')) and not tag_lower.startswith('</'):
-                tag_content = part[1:-1]
-                color_val = None
-                rgb_match = re.search(r'color:\s*rgb\((\d+),\s*(\d+),\s*(\d+)\)', tag_content)
-                if rgb_match:
-                    r, g, b = map(int, rgb_match.groups())
-                    color_val = f"#{r:02x}{g:02x}{b:02x}"
-                else:
-                    hex_match = re.search(r'(?:color[:=]\s*["\']?)(#[0-9a-fA-F]{3,6})', tag_content)
-                    if hex_match:
-                        color_val = hex_match.group(1)
-                    else:
-                        ql_color_match = re.search(r'class="ql-color-([^"]+)"', tag_content)
-                        if ql_color_match:
-                            c_name = ql_color_match.group(1)
-                            if re.match(r'^[0-9a-fA-F]{6}$', c_name):
-                                color_val = f"#{c_name}"
-                            elif c_name.startswith('#'):
-                                color_val = c_name
-                            else:
-                                color_map = {
-                                    "red": "#E74C3C", "orange": "#E67E22", "yellow": "#F1C40F",
-                                    "green": "#2ECC71", "blue": "#3498DB", "purple": "#9B59B6"
-                                }
-                                color_val = color_map.get(c_name, c_name)
-                
-                size_val = None
-                px_match = re.search(r'font-size:\s*([\d\.]+)px', tag_content)
-                if px_match:
-                    px_val = float(px_match.group(1))
-                    size_val = round(px_val * 0.75)
-                else:
-                    pt_match = re.search(r'font-size:\s*([\d\.]+)pt', tag_content)
-                    if pt_match:
-                        size_val = int(float(pt_match.group(1)))
-                    else:
-                        ql_size_match = re.search(r'class="ql-size-([^"]+)"', tag_content)
-                        if ql_size_match:
-                            size_name = ql_size_match.group(1)
-                            pt_map = {"small": 9, "large": 18, "huge": 24}
-                            size_val = pt_map.get(size_name, 12)
-                        else:
-                            font_size_match = re.search(r'size=["\']?(\d+)["\']?', tag_content)
-                            if font_size_match:
-                                size_map = {"1": 9, "2": 10, "3": 12, "4": 14, "5": 18, "6": 24, "7": 32}
-                                size_val = size_map.get(font_size_match.group(1), 12)
-                
-                attrs = []
-                if color_val:
-                    attrs.append(f'color="{color_val}"')
-                if size_val:
-                    attrs.append(f'size="{size_val}"')
-                
-                if attrs:
-                    new_parts.append(f"<font {' '.join(attrs)}>")
-                    converted_tags_stack.append("font")
-                else:
-                    new_parts.append("")
-                    converted_tags_stack.append("empty")
-            elif tag_lower == '</span>' or tag_lower == '</font>':
-                if converted_tags_stack:
-                    state = converted_tags_stack.pop()
-                    if state == "font":
-                        new_parts.append("</font>")
-                    else:
-                        new_parts.append("")
-                else:
-                    new_parts.append("")
-            else:
-                new_parts.append(part)
+    def replace_span_or_font_tag(match):
+        tag_content = match.group(0)
+        
+        color_tag = ""
+        rgb_match = re.search(r'color:\s*rgb\((\d+),\s*(\d+),\s*(\d+)\)', tag_content)
+        if rgb_match:
+            r, g, b = map(int, rgb_match.groups())
+            color_tag = f'<color hex="#{r:02x}{g:02x}{b:02x}">'
         else:
-            new_parts.append(part)
-            
-    return "".join(new_parts)
+            hex_match = re.search(r'(?:color[:=]\s*["\']?)(#[0-9a-fA-F]{3,6})', tag_content)
+            if hex_match:
+                color_tag = f'<color hex="{hex_match.group(1)}">'
+                
+        size_tag = ""
+        px_match = re.search(r'font-size:\s*([\d\.]+)px', tag_content)
+        if px_match:
+            px_val = float(px_match.group(1))
+            pt_val = round(px_val * 0.75) 
+            size_tag = f'<size pt="{pt_val}">'
+        else:
+            pt_match = re.search(r'font-size:\s*([\d\.]+)pt', tag_content)
+            if pt_match:
+                pt_val = int(float(pt_match.group(1)))
+                size_tag = f'<size pt="{pt_val}">'
+            else:
+                ql_size_match = re.search(r'class="ql-size-([^"]+)"', tag_content)
+                if ql_size_match:
+                    size_name = ql_size_match.group(1)
+                    pt_map = {"small": 9, "large": 18, "huge": 24}
+                    size_tag = f'<size pt="{pt_map.get(size_name, 12)}">'
+                else:
+                    font_size_match = re.search(r'size=["\']?(\d+)["\']?', tag_content)
+                    if font_size_match:
+                        size_map = {"1": 9, "2": 10, "3": 12, "4": 14, "5": 18, "6": 24, "7": 32}
+                        size_tag = f'<size pt="{size_map.get(font_size_match.group(1), 12)}">'
+                        
+        return f"{color_tag}{size_tag}"
+        
+    text = re.sub(r'<(span|font)\s+[^>]*>', replace_span_or_font_tag, text)
+    text = text.replace("</span>", "</color></size>")
+    text = text.replace("</font>", "</color></size>")
+    
+    return text
 
 def add_markdown_paragraph_to_word(doc, text):
     from docx.shared import Pt, RGBColor
@@ -851,11 +804,9 @@ def add_markdown_paragraph_to_word(doc, text):
         p = doc.add_paragraph()
         p.add_run("[ 暂无策划设计说明 ]").font.italic = True
         return
-    
-    # 彻底转换为平衡规整的标准标签
+        
     text = normalize_html_styles(text)
     
-    # 分割段落：把 P 标签和列表标签转化为换行符 [P_BREAK] 切分
     text = text.replace('<p>', '').replace('</p>', '[P_BREAK]')
     text = text.replace('<br>', '\n').replace('<br/>', '\n')
     text = text.replace('<li>', '• ').replace('</li>', '[P_BREAK]')
@@ -866,24 +817,21 @@ def add_markdown_paragraph_to_word(doc, text):
     for p_raw in paragraphs_raw:
         p_raw_strip = p_raw.strip()
         if not p_raw_strip and p_raw != "":
-            doc.add_paragraph()  # 空白占位段落
+            doc.add_paragraph() 
             continue
         if not p_raw_strip:
             continue
-        
+            
         p = doc.add_paragraph()
         
-        # 按照标签把普通文本与状态标签切分开
         parts = re.split(r'(<[^>]+>)', p_raw)
         
         bold = False
         italic = False
         underline = False
         strike = False
-        
-        # 引入完美样式栈（Stack）来支持多样式完美嵌套，解决未指定值被 None 覆盖的问题
-        color_stack = []
-        size_stack = []
+        color_hex = None
+        font_size_pt = None
         
         for part in parts:
             if not part:
@@ -898,28 +846,24 @@ def add_markdown_paragraph_to_word(doc, text):
                 elif tag == '</u>': underline = False
                 elif tag == '<strike>': strike = True
                 elif tag == '</strike>': strike = False
-                elif tag.startswith('<font'):
-                    hex_match = re.search(r'color="([^"]+)"', part)
-                    pt_match = re.search(r'size="([^"]+)"', part)
-                    
-                    c_val = hex_match.group(1) if hex_match else None
-                    s_val = float(pt_match.group(1)) if pt_match else None
-                    
-                    color_stack.append(c_val)
-                    size_stack.append(s_val)
-                elif tag == '</font>':
-                    if color_stack: color_stack.pop()
-                    if size_stack: size_stack.pop()
+                elif tag.startswith('<color'):
+                    hex_match = re.search(r'hex="([^"]+)"', part)
+                    if hex_match:
+                        color_hex = hex_match.group(1)
+                elif tag == '</color>': color_hex = None
+                elif tag.startswith('<size'):
+                    pt_match = re.search(r'pt="([^"]+)"', part)
+                    if pt_match:
+                        font_size_pt = float(pt_match.group(1))
+                elif tag == '</size>': font_size_pt = None
             else:
-                # 处理普通纯文字块内的传统 \n 换行
                 sub_lines = part.split('\n')
                 for idx, line in enumerate(sub_lines):
                     if idx > 0:
-                        p.add_run().add_break()  # 换行显示
+                        p.add_run().add_break() 
                     if not line:
                         continue
-                    
-                    # 识别 markdown 的行内轻量级标记
+                        
                     sub_parts = re.split(r'(\*\*.*?\*\*|\*.*?\*|~~.*?~~)', line)
                     for sp in sub_parts:
                         if not sp:
@@ -937,7 +881,7 @@ def add_markdown_paragraph_to_word(doc, text):
                         elif sp.startswith('~~') and sp.endswith('~~'):
                             r_strike = True
                             val = sp[2:-2]
-                        
+                            
                         cleaned_val = re.sub(r'<[^>]+>', '', val)
                         r = p.add_run(cleaned_val)
                         r.bold = r_bold
@@ -945,21 +889,15 @@ def add_markdown_paragraph_to_word(doc, text):
                         r.font.underline = underline
                         r.font.strike = r_strike
                         
-                        # 完美从样式栈顶部获取当前的嵌套效果
-                        active_color = next((c for c in reversed(color_stack) if c is not None), None)
-                        active_size = next((s for s in reversed(size_stack) if s is not None), None)
-                        
-                        # 渲染文字颜色效果
-                        if active_color:
+                        if color_hex:
                             try:
-                                h = active_color.lstrip('#')
+                                h = color_hex.lstrip('#')
                                 r.font.color.rgb = RGBColor(*(int(h[i:i+2], 16) for i in (0, 2, 4)))
                             except Exception:
                                 pass
-                        # 渲染字号效果
-                        if active_size:
+                        if font_size_pt:
                             try:
-                                r.font.size = Pt(active_size)
+                                r.font.size = Pt(font_size_pt)
                             except Exception:
                                 pass
 
@@ -968,19 +906,19 @@ def md_to_pdf_html(text):
         return "<font color='#7F8C8D'><i>[ 暂无策划设计说明 ]</i></font>"
     text = clean_emoji(text)
     
-    # 清洗规范化 HTML 样式，输出对称的 <font color="..." size="..."> 样式标签
     text = normalize_html_styles(text)
     
-    # 块级标签转换
+    text = re.sub(r'<color\s+hex="([^"]+)">', r'<font color="\1">', text)
+    text = text.replace("</color>", "</font>")
+    
+    text = re.sub(r'<size\s+pt="([^"]+)">', r'<font size="\1">', text)
+    text = text.replace("</size>", "</font>")
+    
     text = text.replace('<p>', '').replace('</p>', '<br/>')
     text = text.replace('<br>', '<br/>').replace('<br/>', '<br/>')
     text = text.replace('<li>', '&bull; ').replace('</li>', '<br/>')
-    text = re.sub(r'</?(ul|ol)>', '', text)
-    
-    # 将换行符换成 ReportLab 兼容的折行标签
+    text = re.sub(r'</?(ul|ol)>', '', text) 
     text = text.replace('\n', '<br/>')
-    
-    # 解析 markdown 轻量级格式
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
     text = re.sub(r'~~(.*?)~~', r'<strike>\1</strike>', text)
@@ -1190,11 +1128,9 @@ def create_report_word(selected_configs):
         run_h_summary.font.size = Pt(14)
         run_h_summary.bold = True
         add_bookmark(p_h_summary, f"bm_{current_tid}_summary")
-        
-        ver = st.session_state.get(f"{current_tid}_ver", 0)
         summary_content = st.session_state.get(f"rte_{current_tid}_summary_text", "")
         if not summary_content or str(summary_content).strip() == "":
-            summary_content = st.session_state.get(f"quill_{current_tid}_summary_{ver}", "")
+            summary_content = st.session_state.get(f"quill_{current_tid}_summary", "")
         add_markdown_paragraph_to_word(doc, summary_content)
         
         p_h_scheme = doc.add_paragraph()
@@ -1207,7 +1143,7 @@ def create_report_word(selected_configs):
         add_bookmark(p_h_scheme, f"bm_{current_tid}_scheme")
         scheme_content = st.session_state.get(f"rte_{current_tid}_scheme_text", "")
         if not scheme_content or str(scheme_content).strip() == "":
-            scheme_content = st.session_state.get(f"quill_{current_tid}_scheme_{ver}", "")
+            scheme_content = st.session_state.get(f"quill_{current_tid}_scheme", "")
         add_markdown_paragraph_to_word(doc, scheme_content)
         
         df = clean_df_emojis(item["df"])
@@ -1372,7 +1308,7 @@ def build_pdf_story(buf, selected_configs, page_map):
                 self.setFillColor(colors.HexColor('#7F8C8D'))
                 display_page = self._pageNumber - 1
                 self.drawCentredString(297.6, 20, f"第 {display_page} 页")
-            self.restoreState()
+                self.restoreState()
 
         def setFont(self, psname, size, leading=None):
             canvas.Canvas.setFont(self, psname, size, leading)
@@ -1539,11 +1475,9 @@ def build_pdf_story(buf, selected_configs, page_map):
 
         story.append(RecordPage(f"{current_tid}_summary", page_map))
         story.append(Paragraph(f"<b>{sum_label}</b>", h1_style))
-        
-        ver = st.session_state.get(f"{current_tid}_ver", 0)
         summary_content = st.session_state.get(f"rte_{current_tid}_summary_text", "")
         if not summary_content or str(summary_content).strip() == "":
-            summary_content = st.session_state.get(f"quill_{current_tid}_summary_{ver}", "")
+            summary_content = st.session_state.get(f"quill_{current_tid}_summary", "")
         pdf_summary_html = md_to_pdf_html(summary_content)
         story.append(Paragraph(pdf_summary_html, body_style))
         story.append(Spacer(1, 10))
@@ -1551,7 +1485,7 @@ def build_pdf_story(buf, selected_configs, page_map):
         story.append(Paragraph(f"<b>{sch_label}</b>", h1_style))
         scheme_content = st.session_state.get(f"rte_{current_tid}_scheme_text", "")
         if not scheme_content or str(scheme_content).strip() == "":
-            scheme_content = st.session_state.get(f"quill_{current_tid}_scheme_{ver}", "")
+            scheme_content = st.session_state.get(f"quill_{current_tid}_scheme", "")
         pdf_scheme_html = md_to_pdf_html(scheme_content)
         story.append(Paragraph(pdf_scheme_html, body_style))
         story.append(Spacer(1, 15))
@@ -1626,7 +1560,7 @@ def build_pdf_story(buf, selected_configs, page_map):
         if raw_title == "系统层级关系表":
             sun_bytes = compile_sunburst_image_bytes()
             if sun_bytes:
-                h2_sun_banner_bytes, _, _ = cache_title_banner("🎯 架构权重分析 (Sunburst 占比图)：", "H2")
+                h2_sun_banner_bytes, _, _ = cache_title_banner("🎯 架构权重 analysis (Sunburst 占比图)：", "H2")
                 rl_sun_title = RLImage(io.BytesIO(h2_sun_banner_bytes), width=520, height=29)
                 rl_sun_img = RLImage(io.BytesIO(sun_bytes), width=300, height=300)
                 story.append(Spacer(1, 20))
@@ -1780,7 +1714,7 @@ def show_export_dialog():
         if st.session_state.export_ready:
             main_container.empty()
             with main_container.container():
-                st.success("✅ 报告编译成功！已完美合并您勾选的所有模块和对应树图。")
+                st.success("✅ 报告编译成功！已完美合并您勾选的所有模块 and 对应树图。")
                 st.download_button(
                     label=f"📥 确认并下载 {export_format.split(' ')[0]}",
                     data=st.session_state.export_bytes,
@@ -1788,11 +1722,10 @@ def show_export_dialog():
                     mime=st.session_state.export_mime,
                     width="stretch"
                 )
-        if st.button("🔄 重新编译/更换选择", width="stretch"):
-            reset_export_state()
-            st.rerun()
+                if st.button("🔄 重新编译/更换选择", width="stretch"):
+                    reset_export_state()
+                    st.rerun()
 
-# 辅助回调函数：将动作标记稳定、同步追加到全局和动态文本 Key 中，规避旧输入覆盖
 def append_editor_text(key_text, textarea_key, value_to_append):
     current_text = st.session_state.get(textarea_key, "")
     new_text = current_text + value_to_append
@@ -1805,80 +1738,20 @@ def draw_rich_text_editor(label_id, title_text):
     key_text = f"rte_{label_id}_text"
     _tid = label_id.split("_")[0]
     ver = st.session_state.get(f"{_tid}_ver", 0)
-    if HAS_QUILL:
-        quill_key = f"quill_{label_id}_{ver}"
-        if quill_key not in st.session_state:
-            st.session_state[quill_key] = st.session_state[key_text]
-        content = st_quill(
-            value=st.session_state[quill_key],
-            placeholder="在此编辑内容...可直接在下方更改字体大小、加粗、颜色、列表等效果，支持像 Word 一样实时渲染预览！",
-            toolbar=[
-                [{"size": []}],
-                ["bold", "italic", "underline", "strike"],
-                [{"color": []}, {"background": []}],
-                [{"list": "ordered"}, {"list": "bullet"}],
-                ["clean"]
-            ],
-            key=quill_key
-        )
-        just_imported_key = f"quill_just_imported_{label_id}"
-        if content != st.session_state[key_text]:
-            if st.session_state.get(just_imported_key, False):
-                if content in (None, "", "<p><br></p>"):
-                    pass
-                else:
-                    st.session_state[key_text] = content
-                    st.session_state[just_imported_key] = False
-                    reset_export_state()
-            else:
-                st.session_state[key_text] = content
-                reset_export_state()
-        if content and content not in (None, "", "<p><br></p>"):
-            st.session_state[just_imported_key] = False
-    else:
-        st.markdown('<div class="editor-toolbar">', unsafe_allow_html=True)
-        col_group = st.columns(10, gap="small")  # 升级为10列以平铺10个按键
-        actions = [
-            ("加粗 **B**", "**加粗文本**", f"b_{label_id}"),
-            ("斜体 *I*", "*斜体文本*", f"i_{label_id}"),
-            ("下划线 <u>", "<u>下划线文本</u>", f"u_{label_id}"),
-            ("删除线 ~~", "~~删除线文本~~", f"s_{label_id}"),
-            ("项目 •", "\n- 列表项目", f"bul_{label_id}"),
-            ("编号 1.", "\n1. 列表项目", f"num_{label_id}"),
-            ("字号 A+", "<font size='5'>18px大字号文本</font>", f"sz_{label_id}"),
-            ("字色 🎨", "<font color='#E74C3C'>红字文本</font>", f"co_{label_id}"),  # 修复补齐字色按键
-            ("雅黑 F", "<font face='Microsoft YaHei'>微软雅黑文字</font>", f"ft_{label_id}"),
-            ("换行 ↩", "\n", f"br_{label_id}")
-        ]
-        textarea_key = f"{key_text}_{ver}"
-        if textarea_key not in st.session_state:
-            st.session_state[textarea_key] = st.session_state[key_text]
-        
-        for idx, (label, value_to_append, btn_key) in enumerate(actions):
-            with col_group[idx]:
-                st.button(
-                    label, 
-                    key=btn_key, 
-                    on_click=append_editor_text, 
-                    args=(key_text, textarea_key, value_to_append)
-                )
-        st.markdown('</div>', unsafe_allow_html=True)
-        input_text = st.text_area(
-            label="编辑区：",
-            key=textarea_key,
-            height=140,
-            placeholder="请在此输入系统设计细节描述，支持 Markdown 与部分 HTML 标签混合排版...",
-            label_visibility="collapsed"
-        )
-        if input_text != st.session_state[key_text]:
-            st.session_state[key_text] = input_text
-            reset_export_state()
-        with st.expander("👁️ 查看实时排版解析预览：", expanded=True):
-            if input_text:
-                st.markdown(input_text, unsafe_allow_html=True)
-            else:
-                st.caption("暂无内容，请在编辑框内填写。")
-        st.info("💡 **想要更棒的 Word 级编辑体验？** \n\n系统检测到未安装 `streamlit-quill` 模块。安装后，无需编写代码，**直接在输入框内框选文字，即可像使用 Word/WPS 一样点选字色、背景、字号并实时生效**！建议在您的终端命令行执行：\n\n```bash\npip install streamlit-quill\n```\n\n安装完成后重启本工具箱即可完美解锁。")
+    textarea_key = f"{key_text}_{ver}"
+    if textarea_key not in st.session_state:
+        st.session_state[textarea_key] = st.session_state[key_text]
+    
+    input_text = st.text_area(
+        label="编辑区：",
+        key=textarea_key,
+        height=140,
+        placeholder="请在此输入系统设计细节描述，支持 Markdown 与部分 HTML 标签混合排版...",
+        label_visibility="collapsed"
+    )
+    if input_text != st.session_state[key_text]:
+        st.session_state[key_text] = input_text
+        reset_export_state()
 
 with st.sidebar:
     st.header("🛠️ 游戏设计工具箱")
@@ -2164,7 +2037,7 @@ elif tool_mode == "🎨 界面层级拆解":
                                 st.markdown(f"- **上级容器**: `{parent_name}`")
                                 st.markdown(f"- **核心组件**: {comps if pd.notna(comps) else '无'}")
                                 st.markdown(f"- **设计备注**: {notes if pd.notna(notes) else '无'}")
-                                st.divider()
+                            st.divider()
 
 elif tool_mode == "⚔️ 战斗系统连招拆解":
     st.title("⚔️ 战斗系统动作派生与连招拆解工具")
@@ -2243,7 +2116,7 @@ elif tool_mode == "⚔️ 战斗系统连招拆解":
                                 st.markdown(f"- **招式类型**: `{action_type}`")
                                 st.markdown(f"- **战斗判定/机制属性**: `{props}`")
                                 st.markdown(f"- **交互美术备注**: {notes if pd.notna(notes) else '无'}")
-                                st.divider()
+                            st.divider()
 
 elif tool_mode == "🐟 鱼骨问题分析":
     st.title("🐟 鱼骨问题与因果拆解分析工具")
